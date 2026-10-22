@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { runHomepageBuild, type RunPhase } from "@homepage/agent-core";
+import { PROVIDERS, runHomepageBuild, runLocalHomepageBuild, type RunPhase } from "@homepage/agent-core";
 import { shouldAutoRebuild } from "./auto-rebuild";
 import { browserBridge } from "./browser-bridge";
 import {
@@ -10,7 +10,7 @@ import {
   type BuildState,
   type PageMsg,
 } from "./protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveHomepage } from "./storage";
+import { KEYS, extensionStore, loadHomepage, loadSettings, modelFor, saveHomepage } from "./storage";
 
 type Port = Parameters<Parameters<typeof browser.runtime.onConnect.addListener>[0]>[0];
 
@@ -101,6 +101,16 @@ export class BuildManager {
       return;
     }
 
+    // A Gemini/OpenRouter build lives only in this worker; if the worker was
+    // killed mid-build there is nothing to reattach to. Don't leave tabs
+    // painting a build that will never finish.
+    const snapshot = await extensionStore.get<BuildState>(KEYS.buildSnapshot);
+    if (snapshot?.running && !this.running) {
+      const message = "The previous build was interrupted. Start it again.";
+      this.state = { ...snapshot, running: false, phase: "error", error: message };
+      await this.mirror(true);
+    }
+
     await this.maybeAutoRebuild();
   }
 
@@ -147,12 +157,19 @@ export class BuildManager {
     this.controller = new AbortController();
 
     try {
-      const { apiKey, systemPrompt, model } = await loadSettings();
+      const settings = await loadSettings();
+      // An interrupted session can only be an Anthropic one: the other providers'
+      // loops run in this worker and leave nothing to reattach to.
+      const resumeSessionId = opts.resume
+        ? await extensionStore.get<string>(KEYS.activeSessionId)
+        : undefined;
+      const provider = resumeSessionId ? "anthropic" : settings.provider;
+      const apiKey = settings.apiKeys[provider];
       if (!apiKey) {
         // Manual builds are gated behind the key-setup screen and auto-builds
         // require a key, so this only happens if the key was removed.
-        console.warn("[BuildManager] startBuild aborted — no API key in storage");
-        const message = "No Anthropic API key found. Add your key and try again.";
+        console.warn("[BuildManager] startBuild aborted — no API key in storage", { provider });
+        const message = `No ${PROVIDERS[provider].label} API key found. Add your key in Settings and try again.`;
         this.state = { ...INITIAL_BUILD_STATE, phase: "error", error: message };
         this.broadcast({ kind: "error", message });
         return;
@@ -161,39 +178,39 @@ export class BuildManager {
       this.state = { ...INITIAL_BUILD_STATE, running: true, phase: "setup" };
       this.broadcast({ kind: "snapshot", state: this.state });
       this.startKeepalive();
-      console.log("[BuildManager] build started", { resume: Boolean(opts.resume) });
+      console.log("[BuildManager] build started", { resume: Boolean(resumeSessionId), provider });
+
+      const common = {
+        bridge: browserBridge,
+        userSystemPrompt: settings.systemPrompt,
+        blockedSites: async () => (await loadSettings()).blockedSites,
+        signal: this.controller.signal,
+        callbacks: {
+          onPhase: (phase: RunPhase, detail?: string) => this.onPhase(phase, detail),
+          onText: (chunk: string) => this.onText(chunk),
+          onLog: (line: string) => this.onLog(line),
+        },
+      };
 
       // The key is the user's own, read from local storage — there is no server
       // to hide it behind. See ARCHITECTURE.md → Privacy.
-      const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
+      const result =
+        provider === "anthropic"
+          ? await runHomepageBuild({
+              ...common,
+              client: new Anthropic({ apiKey, dangerouslyAllowBrowser: true }),
+              store: extensionStore,
+              model: settings.model,
+              resumeSessionId,
+            })
+          : await runLocalHomepageBuild({ ...common, provider, apiKey, model: modelFor(settings, provider) });
 
-      const resumeSessionId = opts.resume
-        ? await extensionStore.get<string>(KEYS.activeSessionId)
-        : undefined;
-
-      const result = await runHomepageBuild({
-        client,
-        bridge: browserBridge,
-        store: extensionStore,
-        userSystemPrompt: systemPrompt,
-        blockedSites: async () => (await loadSettings()).blockedSites,
-        model,
-        resumeSessionId,
-        signal: this.controller.signal,
-        callbacks: {
-          onPhase: (phase, detail) => this.onPhase(phase, detail),
-          onText: (chunk) => this.onText(chunk),
-          onLog: (line) => this.onLog(line),
-        },
-      });
-
-      // Persist the raw TSX; the page transpiles it for preview.
-      await saveHomepage(result.code);
+      const homepage = await saveHomepage(result.edition);
 
       this.state = { ...this.state, running: false, phase: "done" };
-      this.broadcast({ kind: "done", code: result.code });
+      this.broadcast({ kind: "done", homepage });
       await this.mirror(true);
-      console.log("[BuildManager] build done", { bytes: result.code.length, source: result.source });
+      console.log("[BuildManager] build done", { source: result.source });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.state = { ...this.state, running: false, phase: "error", error: message };

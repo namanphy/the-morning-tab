@@ -4,8 +4,8 @@ import { defineConfig } from "wxt";
 export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   manifest: {
-    name: "AI Homepage",
-    description: "A new-tab page an agent rebuilds daily from what you've actually been browsing.",
+    name: "The Morning Tab",
+    description: "A newspaper-style new tab an AI agent fills daily from what you've actually been browsing.",
     permissions: [
       "history", //       getHistory tool
       "tabs", //          getPageHtml: open pages and watch them load
@@ -15,7 +15,7 @@ export default defineConfig({
       "alarms", //        heartbeat: scheduled rebuilds + reattach after a worker kill
       "notifications", // surface a failed headless rebuild when no tab is open
     ],
-    // Needed to scrape arbitrary pages; also exempts api.anthropic.com from CORS.
+    // Needed to scrape arbitrary pages; also exempts the model APIs from CORS.
     host_permissions: ["<all_urls>"],
   },
 });

@@ -38,7 +38,10 @@ browser.webRequest.onResponseStarted.addListener(
   (details) => {
     apiAddress = details.ip;
   },
-  { urls: ["https://api.anthropic.com/*"], tabId: -1 },
+  {
+    urls: ["https://api.anthropic.com/*", "https://generativelanguage.googleapis.com/*", "https://openrouter.ai/*"],
+    tabId: -1,
+  },
 );
 
 /** Keep content and links; drop scripts, styles, attributes and empty wrappers. */

@@ -1,11 +1,25 @@
-import { useState } from "react";
-import { MODEL_CHOICES, normalizeBlockList, type HomepageModel } from "@homepage/agent-core";
+import { useEffect, useState } from "react";
+import {
+  MODEL_CHOICES,
+  PROVIDERS,
+  PROVIDER_IDS,
+  listProviderModels,
+  normalizeBlockList,
+  type ModelOption,
+  type ProviderId,
+} from "@homepage/agent-core";
 import { btn } from "./ui";
+
+const field = { padding: "4px 8px", fontSize: 14, borderRadius: 4, border: "1px solid #ddd" } as const;
 
 export function SettingsModal({
   initialPrompt,
   blockedSites,
-  model,
+  provider,
+  onChangeProvider,
+  apiKeys,
+  onSaveKey,
+  models,
   onChangeModel,
   autoRebuild,
   onToggleAutoRebuild,
@@ -14,8 +28,13 @@ export function SettingsModal({
 }: {
   initialPrompt: string;
   blockedSites: string[];
-  model: HomepageModel;
-  onChangeModel: (next: HomepageModel) => void;
+  provider: ProviderId;
+  onChangeProvider: (next: ProviderId) => void;
+  apiKeys: Record<ProviderId, string | null>;
+  onSaveKey: (provider: ProviderId, key: string) => void;
+  /** The model each provider builds with. */
+  models: Record<ProviderId, string>;
+  onChangeModel: (provider: ProviderId, next: string) => void;
   autoRebuild: boolean;
   onToggleAutoRebuild: (next: boolean) => void;
   onClose: () => void;
@@ -23,6 +42,26 @@ export function SettingsModal({
 }) {
   const [draft, setDraft] = useState(initialPrompt);
   const [blockedDraft, setBlockedDraft] = useState(blockedSites.join("\n"));
+  const [keyDraft, setKeyDraft] = useState("");
+  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
+  const [modelListError, setModelListError] = useState<string | null>(null);
+  const info = PROVIDERS[provider];
+  const hasKey = Boolean(apiKeys[provider]);
+
+  // These providers' model lists change too often to ship; read them live.
+  useEffect(() => {
+    setKeyDraft("");
+    setModelOptions([]);
+    setModelListError(null);
+    if (provider === "anthropic") return;
+    const controller = new AbortController();
+    listProviderModels(provider, apiKeys[provider], controller.signal)
+      .then(setModelOptions)
+      .catch((err) => {
+        if (!controller.signal.aborted) setModelListError(String(err instanceof Error ? err.message : err));
+      });
+    return () => controller.abort();
+  }, [provider, apiKeys[provider]]);
 
   return (
     <div
@@ -66,22 +105,87 @@ export function SettingsModal({
         <p id="blocked-sites-help" style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
           One per line. Subdomains are included. Use *.example.com for wildcards.
         </p>
-        <label
-          style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, color: "#333", fontSize: 14 }}
-        >
-          Model
-          <select
-            value={model}
-            onChange={(e) => onChangeModel(e.target.value as HomepageModel)}
-            style={{ padding: "4px 8px", fontSize: 14, borderRadius: 4, border: "1px solid #ddd" }}
-          >
-            {MODEL_CHOICES.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, color: "#333", fontSize: 14 }}>
+          Provider
+          <select value={provider} onChange={(e) => onChangeProvider(e.target.value as ProviderId)} style={field}>
+            {PROVIDER_IDS.map((id) => (
+              <option key={id} value={id}>
+                {PROVIDERS[id].label}
+                {apiKeys[id] ? "" : " (no key)"}
               </option>
             ))}
           </select>
         </label>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+          <input
+            type="password"
+            value={keyDraft}
+            onChange={(e) => setKeyDraft(e.target.value)}
+            placeholder={hasKey ? "Key saved. Paste a new one to replace it." : `${info.label} API key (${info.keyPlaceholder})`}
+            aria-label={`${info.label} API key`}
+            style={{ ...field, flex: 1, padding: 8, fontFamily: "ui-monospace, monospace" }}
+          />
+          <button
+            style={{ ...btn, opacity: info.looksLikeKey(keyDraft.trim()) ? 1 : 0.5 }}
+            disabled={!info.looksLikeKey(keyDraft.trim())}
+            onClick={() => {
+              onSaveKey(provider, keyDraft.trim());
+              setKeyDraft("");
+            }}
+          >
+            Save key
+          </button>
+        </div>
+        <p style={{ color: hasKey ? "#888" : "#a02620", fontSize: 12, margin: "6px 0 0" }}>
+          {hasKey ? "" : "No key saved for this provider yet. "}
+          Keys from{" "}
+          <a href={info.keyUrl} target="_blank" rel="noreferrer">
+            {new URL(info.keyUrl).host}
+          </a>
+          . {info.dataNote}
+        </p>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 16, color: "#333", fontSize: 14 }}>
+          Model
+          {provider === "anthropic" ? (
+            <select value={models.anthropic} onChange={(e) => onChangeModel("anthropic", e.target.value)} style={field}>
+              {MODEL_CHOICES.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <>
+              <input
+                list="provider-models"
+                value={models[provider]}
+                onChange={(e) => onChangeModel(provider, e.target.value)}
+                onBlur={(e) => {
+                  if (!e.target.value.trim()) onChangeModel(provider, info.defaultModel);
+                }}
+                style={{ ...field, flex: 1, fontFamily: "ui-monospace, monospace" }}
+              />
+              <datalist id="provider-models">
+                {modelOptions.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </datalist>
+            </>
+          )}
+        </label>
+        {provider !== "anthropic" && (
+          <p style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
+            {modelListError
+              ? `Couldn't load the model list (${modelListError}). You can still type a model ID.`
+              : provider === "openrouter"
+                ? `${modelOptions.length || "Loading"} free models with tool support. A build makes ~15–30 requests, and OpenRouter allows 20 free requests a minute and 50 a day (1,000 once you've bought $10 of credit). A rate-limited model falls back to the free router automatically.`
+                : hasKey
+                  ? "Pick a model or type an ID. gemini-flash-latest always points at Google's current Flash model."
+                  : "Save a key to see the models available to you."}
+          </p>
+        )}
         <label
           style={{
             display: "flex",
@@ -102,7 +206,7 @@ export function SettingsModal({
         </label>
         <p style={{ color: "#888", fontSize: 12, margin: "6px 0 0" }}>
           When on, the extension builds one morning edition a day in the background (first time
-          Chrome is open between 5am and noon), so your next tab shows a fresh one (uses your API key).
+          Chrome is open between 5am and noon), so your next tab shows a fresh one (uses your API key and quota).
         </p>
         <div style={{ display: "flex", gap: 12, marginTop: 20, justifyContent: "flex-end" }}>
           <button

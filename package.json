@@ -1,9 +1,10 @@
 {
-  "name": "ai-homepage",
+  "name": "the-morning-tab",
   "private": true,
   "packageManager": "pnpm@10.11.1",
   "scripts": {
     "build": "pnpm --filter @homepage/extension build",
+    "zip": "pnpm build && bash scripts/package-extension.sh",
     "dev": "pnpm --filter @homepage/extension dev",
     "typecheck": "pnpm -r typecheck",
     "test": "bun test harness/",

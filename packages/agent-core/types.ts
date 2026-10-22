@@ -1,3 +1,5 @@
+import type { Edition } from "./edition";
+
 /**
  * Contracts shared by every host that can drive the homepage agent.
  *
@@ -112,8 +114,12 @@ export interface RunCallbacks {
 }
 
 export interface HomepageBuildResult {
-  code: string;
+  /** The homepage's content, validated; the layout itself lives in the host. */
+  edition: Edition;
   sessionId: string;
-  /** Where the code came from: a session output file, or a fenced block in the final message. */
-  source: "session-output" | "message-fence";
+  /**
+   * Where the edition came from: a session output file, a file the local loop's
+   * write tool stored, or JSON pasted into the final message.
+   */
+  source: "session-output" | "local-file" | "message-fence";
 }

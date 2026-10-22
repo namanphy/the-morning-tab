@@ -33,9 +33,23 @@ service worker        Anthropic loop        sandbox
     │                       ├─ grep / read ───▶│
     │◀─ agent.message ──────┤                  │
     │◀─ status_idle ────────┤  end_turn        │
-    ├─ files.list(scope_id) ───────────────────▶  /mnt/session/outputs/homepage.tsx
+    ├─ files.list(scope_id) ───────────────────▶  /mnt/session/outputs/homepage.json
     └─ sessions.delete ────▶│                  │
 ```
+
+### Gemini and OpenRouter
+
+Managed Agents is Anthropic-only, so for the other providers
+`packages/agent-core/local-agent.ts` runs the same job as a plain tool loop in the
+service worker over the OpenAI-compatible chat completions API (Gemini's
+`/v1beta/openai`, OpenRouter's `/api/v1`). `getHistory` and `getPageHtml` share
+their handlers (and blocking) with the hosted build (`tools.ts`); `read` / `grep` /
+`glob` / `write` run over an in-memory file system holding the scraped pages, with
+results capped so a small model's context isn't flooded. Nothing is uploaded except
+the model requests themselves, so there is no cleanup, and also nothing to
+reattach to: a build interrupted by a worker kill is reported as interrupted and
+must be restarted. Model lists are read live in Settings
+(`listProviderModels`), since OpenRouter's free models change week to week.
 
 ### Keeping the worker alive
 
@@ -57,17 +71,26 @@ build state, then streams phase/text/log deltas. Every open tab shows the same l
 run. A throttled snapshot is also mirrored to storage so a tab opened while the
 worker is asleep paints instantly.
 
-The finished component renders inside a Sandpack iframe
-(`entrypoints/newtab/components/HomepagePreview.tsx`): it is model-written code, so
-it runs sandboxed, not in the extension's own page.
+The agent writes data, not UI. Its deliverable is an *edition*
+(`packages/agent-core/edition.ts`): a lead, top stories, sections, briefs and
+upcoming dates. `parseEdition` is the only way in. It drops any story without an
+http(s) link, trims every string and caps every list. The fixed layout
+(`entrypoints/newtab/components/Newspaper.tsx`) then renders it as plain React in
+the extension page, with no sandbox or transpiler, because nothing the model wrote
+is executed. The local loop validates on `write`, so a malformed edition goes
+back to the model as a tool error and gets fixed in the same build.
 
 ## Layout
 
 ```
 packages/agent-core/      host-agnostic agent loop — imports no chrome.*, browser.*, or node:*
   orchestrator.ts         runHomepageBuild: session lifecycle, event loop, tool dispatch, cleanup
+  local-agent.ts          runLocalHomepageBuild: the Gemini/OpenRouter loop + in-memory read/grep/glob/write
+  providers.ts            provider metadata, live model lists
+  tools.ts                getHistory / getPageHtml handlers shared by both loops
   setup.ts                ensureAgent / ensureEnvironment (created once, cached by ID)
   prompt.ts               system prompt + per-build kickoff message
+  edition.ts              the Edition format the agent fills, and parseEdition (validation)
   schemas.ts              custom tool input schemas and defaults
   history-digest.ts       narrows raw history to fit a tool result
   types.ts                BrowserBridge, KVStore, RunPhase, …
@@ -85,7 +108,6 @@ apps/extension/           MV3 extension (WXT + React)
     protocol.ts           page ↔ worker messages and the five UI build steps
     auto-rebuild.ts       when to rebuild on a schedule
     storage.ts            every chrome.storage key, settings, saved homepage
-    transpile.ts          TSX → JS for the preview
 
 harness/                  Bun scripts: drive agent-core with a fixture/fetch bridge, test the extension
 ```
@@ -96,7 +118,7 @@ harness/                  Bun scripts: drive agent-core with a fixture/fetch bri
 |---|---|
 | `pnpm test` | The history digest is capped, ranked, drops `urls[]`, reports `totalSitesSeen` |
 | `pnpm agent:run` | Full build against the real API: tools, mounting, sandbox grep/read, deliverable, cleanup |
-| `pnpm agent:verify` | The deliverable transforms, evaluates and server-renders |
+| `pnpm agent:verify` | The edition validates, carries real links, and renders in the newspaper layout |
 | `pnpm agent:resume-test` | A build killed with a tool call pending can be reattached and finished |
 | `pnpm agent:retention <sessionId>` | The session and every uploaded page body are actually deleted |
 | `pnpm extension:test` | In headless Chrome: worker registers, new tab renders, port protocol answers, `chrome.history` reads |

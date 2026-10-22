@@ -10,8 +10,7 @@
     "@anthropic-ai/sdk": "^0.110.0",
     "@homepage/agent-core": "workspace:*",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "sucrase": "^3.35.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

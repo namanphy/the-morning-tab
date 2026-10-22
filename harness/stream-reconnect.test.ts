@@ -49,8 +49,8 @@ test("reconnects when the stream closes before the session finishes", async () =
       },
     },
     files: {
-      list: async function* () { if (written) yield { id: "output", filename: "homepage.tsx" }; },
-      download: async () => new Response("export default function PersonalizedHomepage() {}"),
+      list: async function* () { if (written) yield { id: "output", filename: "homepage.json" }; },
+      download: async () => new Response(JSON.stringify({ lead: { title: "Lead", url: "https://example.com/lead", source: "Example", summary: "Why it matters." }, topStories: [], sections: [], briefs: [], upcoming: [] })),
       upload: async () => ({ id: "file-1" }),
       delete: async () => {},
     },
@@ -67,7 +67,7 @@ test("reconnects when the stream closes before the session finishes", async () =
   const result = await runHomepageBuild({ client, store, bridge });
 
   expect(opened).toBe(2);
-  expect(result.code).toContain("PersonalizedHomepage");
+  expect(result.edition.lead.title).toBe("Lead");
   // Kicked off once, and the tool call answered once, across both connections.
   expect(sent.filter((e) => e.type === "user.message")).toHaveLength(1);
   expect(sent.filter((e) => e.type === "user.custom_tool_result")).toHaveLength(1);
@@ -122,8 +122,8 @@ test("resends a tool result whose send failed, without re-running the tool", asy
       },
     },
     files: {
-      list: async function* () { if (log.includes(idle)) yield { id: "output", filename: "homepage.tsx" }; },
-      download: async () => new Response("export default function PersonalizedHomepage() {}"),
+      list: async function* () { if (log.includes(idle)) yield { id: "output", filename: "homepage.json" }; },
+      download: async () => new Response(JSON.stringify({ lead: { title: "Lead", url: "https://example.com/lead", source: "Example", summary: "Why it matters." }, topStories: [], sections: [], briefs: [], upcoming: [] })),
       upload: async () => ({ id: "file-1" }),
       delete: async () => {},
     },
@@ -142,7 +142,7 @@ test("resends a tool result whose send failed, without re-running the tool", asy
 
   const result = await runHomepageBuild({ client, store, bridge });
 
-  expect(result.code).toContain("PersonalizedHomepage");
+  expect(result.edition.lead.title).toBe("Lead");
   expect(scrapes).toBe(1);
   const results = delivered.filter((e) => e.type === "user.custom_tool_result");
   expect(results).toHaveLength(1);

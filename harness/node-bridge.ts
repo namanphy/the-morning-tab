@@ -13,7 +13,7 @@ import type { BrowserBridge, KVStore, RawSiteMetadata } from "@homepage/agent-co
 /** Harness state (cached agent/environment IDs, active session) and output, next to these scripts. */
 export const STATE_PATH = join(import.meta.dir, ".agent-state.json");
 export const OUT_DIR = join(import.meta.dir, "out");
-export const OUT_PATH = join(OUT_DIR, "homepage.tsx");
+export const OUT_PATH = join(OUT_DIR, "homepage.json");
 
 export class FileKVStore implements KVStore {
   constructor(private readonly path: string) {}

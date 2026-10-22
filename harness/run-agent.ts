@@ -43,24 +43,25 @@ async function main() {
   });
 
   const elapsed = ((Date.now() - started) / 1000).toFixed(1);
-  writeFileSync(OUT_PATH, result.code);
+  writeFileSync(OUT_PATH, JSON.stringify(result.edition, null, 2));
+  const { edition } = result;
+  const stories = [edition.lead, ...edition.topStories, ...edition.sections.flatMap((s) => s.stories)];
 
   console.log("\n\n========== RESULT ==========");
   console.log(`session      : ${result.sessionId}`);
   console.log(`source       : ${result.source}`);
-  console.log(`code length  : ${result.code.length} bytes`);
+  console.log(`lead         : ${edition.lead.title}`);
+  console.log(`stories      : ${stories.length} in ${edition.sections.length} sections`);
   console.log(`elapsed      : ${elapsed}s`);
   console.log(`written to   : ${OUT_PATH}`);
 
-  // Shape checks. The real proof is `pnpm agent:verify`, which
-  // transforms, evaluates and server-renders the component.
+  // Shape checks. parseEdition already guarantees every link is http(s); the
+  // fuller proof is `pnpm agent:verify`, which renders it in the real layout.
   const checks: Array<[string, boolean]> = [
-    // `export default function PersonalizedHomepage()` and
-    // `export default PersonalizedHomepage;` are both valid.
-    ["default-exports the component", /export\s+default\s+(function\s+)?PersonalizedHomepage\b/.test(result.code)],
-    ["imports React", /import\s+React/.test(result.code)],
-    ["no non-React imports", !/from\s+['"](?!react['"])[^'"]+['"]/.test(result.code)],
-    ["has real hrefs", /https?:\/\//.test(result.code)],
+    ["lead has a summary", Boolean(edition.lead.summary)],
+    ["has top stories", edition.topStories.length > 0],
+    ["has sections", edition.sections.length > 0],
+    ["at least 5 distinct links", new Set(stories.map((s) => s.url)).size >= 5],
   ];
 
   console.log("\n========== CONTRACT ==========");

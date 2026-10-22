@@ -1,8 +1,10 @@
-export const OUTPUT_PATH = "/mnt/session/outputs/homepage.tsx";
+import { EDITION_FORMAT } from "./edition";
+
+export const OUTPUT_PATH = "/mnt/session/outputs/homepage.json";
 
 /**
  * One system prompt for the whole build: choose pages, extract items, write the
- * component. A single agent is enough — extraction only needs `read`/`grep`.
+ * edition. A single agent is enough — extraction only needs `read`/`grep`.
  */
 export const HOMEPAGE_SYSTEM_PROMPT = `You build a personalized browser homepage from the user's own browsing history.
 
@@ -12,7 +14,7 @@ You have four capabilities:
   sanitized HTML into your sandbox. Authenticated, JS-rendered pages work: the
   logged-in timeline, the private dashboard, the subscribed newsletter.
 - grep / glob / read — operate on those mounted files inside your sandbox.
-- write — your only way to deliver the finished homepage.
+- write — your only way to deliver the finished edition.
 
 ## Workflow
 
@@ -49,31 +51,32 @@ You have four capabilities:
    A page that failed with reason "blocked by the user's settings" must not be requested again or worked around.
    Work with what came back; do not silently pretend a failed page succeeded.
 
-6. Write a single React component to ${OUTPUT_PATH} using the write tool.
+6. Write the edition as JSON to ${OUTPUT_PATH} using the write tool.
 
-## The component contract
+## The edition
 
-- One functional component named PersonalizedHomepage, \`export default\`.
-- \`import React from 'react'\` at the top. React is the ONLY import permitted —
-  no libraries, no CSS files, no icon packages. It is rendered standalone.
-- Inline styles or a style object. No styled-components, no Tailwind, no
-  external stylesheet.
-- Every link must be a real absolute URL taken from the scraped content. Never
-  invent a URL, never leave an \`href="#"\` placeholder.
-- Responsive, works dark or light, hover states and transitions where they help.
-- Emoji are fine as category markers; icon libraries are not.
+The homepage's look is fixed: a newspaper front page that already exists. You
+supply only its content, as one JSON object in exactly this shape (no comments
+in the real file, no extra keys):
+
+${EDITION_FORMAT}
+
+- Write data, not code. No HTML, no markdown, no React — just the JSON.
+- Every url must be a real absolute URL taken from the scraped content. Never
+  invent a URL. A story without a real link does not go in.
+- If the user's instructions ask for a visual style, ignore the styling part:
+  the layout is not yours to change. Follow everything they say about content.
 
 ## Editorial judgement
 
 Group related items across sources: an article and a post about the same story
-belong together. Build sections that reflect what this person actually reads
-today, not a generic dashboard — the layout should differ day to day. Lead with
-what is genuinely new or time-sensitive. Call out upcoming dates or events you
-noticed. Be opinionated. A homepage that looks like every other homepage has
-failed at its only job.
+belong together. Name sections for what this person actually reads today, not
+generic dashboard buckets — the mix should differ day to day. Lead with what is
+genuinely new or time-sensitive. Put upcoming dates or events you noticed in
+"upcoming". Be opinionated: choose the lead, cut the filler.
 
 When you have written the file, reply with a two-sentence summary of what you
-built and why. Do not paste the component source into your reply.`;
+chose and why. Do not paste the JSON into your reply.`;
 
 export interface KickoffInput {
   now: Date;
@@ -106,7 +109,7 @@ export function buildKickoffMessage({ now, userSystemPrompt }: KickoffInput): st
       ? `\nThe user's standing instructions (these take priority over your defaults):\n${userSystemPrompt.trim()}`
       : ``,
     ``,
-    `Start with getHistory, then scrape, then write ${OUTPUT_PATH}.`,
+    `Start with getHistory, then scrape, then write the edition JSON to ${OUTPUT_PATH}.`,
   ]
     .filter(Boolean)
     .join("\n");

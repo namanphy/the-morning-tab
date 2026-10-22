@@ -7,7 +7,7 @@ import {
   type BuildState,
   type PageMsg,
 } from "@/lib/protocol";
-import { KEYS, extensionStore } from "@/lib/storage";
+import { KEYS, extensionStore, type Homepage } from "@/lib/storage";
 
 type Port = ReturnType<typeof browser.runtime.connect>;
 
@@ -39,9 +39,9 @@ function reduce(state: BuildState, msg: BuildMsg): BuildState {
  * Thin client onto the worker-hosted build. Connects the port, subscribes for a
  * snapshot, and reduces incoming deltas into React state. Every open tab runs
  * one of these, so they all render the same live run. `onDone` receives the
- * new homepage's raw TSX.
+ * new homepage.
  */
-export function useHomepageBuild(onDone: (code: string) => void) {
+export function useHomepageBuild(onDone: (homepage: Homepage) => void) {
   const [state, setState] = useState<BuildState>(INITIAL_BUILD_STATE);
   const portRef = useRef<Port | null>(null);
   const onDoneRef = useRef(onDone);
@@ -52,7 +52,7 @@ export function useHomepageBuild(onDone: (code: string) => void) {
 
     const handleMsg = (raw: unknown) => {
       const msg = raw as BuildMsg;
-      if (msg.kind === "done") onDoneRef.current(msg.code);
+      if (msg.kind === "done") onDoneRef.current(msg.homepage);
       setState((s) => reduce(s, msg));
     };
 

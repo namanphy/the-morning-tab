@@ -1,9 +1,10 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { buildHistoryDigest, slugifyUrl } from "./history-digest";
+import { editionFromMessage, parseEdition, type Edition } from "./edition";
+import { slugifyUrl } from "./history-digest";
 import { OUTPUT_PATH, buildKickoffMessage } from "./prompt";
-import { DEFAULT_BLOCKED_SITES, isAllowedUrl, isBlocked, isPrivateAddress, normalizeBlockList } from "./site-filter";
-import { DEFAULTS } from "./schemas";
+import { DEFAULT_BLOCKED_SITES, normalizeBlockList } from "./site-filter";
 import { STORAGE_KEYS, ensureAgent, ensureEnvironment, type HomepageModel } from "./setup";
+import { loadAllowedPages, runGetHistory, type Emit } from "./tools";
 import type {
   BrowserBridge,
   GetHistoryResult,
@@ -12,18 +13,10 @@ import type {
   KVStore,
   PageRef,
   RunCallbacks,
-  RunPhase,
 } from "./types";
 
 type SessionEvent = Anthropic.Beta.Sessions.BetaManagedAgentsSessionEvent;
 type CustomToolUse = Anthropic.Beta.Sessions.BetaManagedAgentsAgentCustomToolUseEvent;
-
-/** Callbacks with the optionality resolved, so call sites don't repeat `?.`. */
-interface Emit {
-  phase(phase: RunPhase, detail?: string): void;
-  text(chunk: string): void;
-  log(line: string): void;
-}
 
 const MANAGED_AGENTS_BETA = "managed-agents-2026-04-01";
 
@@ -108,7 +101,7 @@ export async function runHomepageBuild(opts: RunOptions): Promise<HomepageBuildR
       let result: GetHistoryResult | GetPageHtmlResult;
       switch (event.name) {
         case "getHistory":
-          result = await runGetHistory(event, bridge, emit, blockedSites);
+          result = await runGetHistory(event.input as { daysToAnalyze?: number; maxResults?: number }, bridge, emit, blockedSites);
           break;
         case "getPageHtml":
           result = await runGetPageHtml(event, { client, bridge, sessionId: sessionId!, rememberUpload, emit, blockedSites });
@@ -278,9 +271,9 @@ export async function runHomepageBuild(opts: RunOptions): Promise<HomepageBuildR
     }
 
     emit.phase("writing");
-    const code = await collectDeliverable(client, sessionId, finalMessage, emit);
+    const { edition, source } = await collectDeliverable(client, sessionId, finalMessage, emit);
     emit.phase("done");
-    return { code: code.code, sessionId, source: code.source };
+    return { edition, sessionId, source };
   } finally {
     // Privacy: the event log holds every domain, title and page body we sent,
     // and uploads persist independently of the session. Delete both, always.
@@ -306,29 +299,6 @@ function isTerminal(event: SessionEvent): boolean {
 // tool implementations
 // ---------------------------------------------------------------------------
 
-async function runGetHistory(
-  event: CustomToolUse,
-  bridge: BrowserBridge,
-  emit: Emit,
-  blockedSites: string[],
-): Promise<GetHistoryResult> {
-  const input = event.input as { daysToAnalyze?: number; maxResults?: number };
-  const daysToAnalyze = input.daysToAnalyze ?? DEFAULTS.daysToAnalyze;
-  const maxResults = input.maxResults ?? DEFAULTS.maxResults;
-
-  emit.phase("history", `${daysToAnalyze}d`);
-  const { sites, totalSitesSeen } = await bridge.getHistory({ daysToAnalyze, maxResults });
-  const allowed = sites.filter((site) => !isBlocked(site.domain, blockedSites));
-  // Blocked domains are dropped from the count too: the model is never told they exist.
-  const digest = buildHistoryDigest(allowed, {
-    daysToAnalyze,
-    maxResults,
-    totalSitesSeen: totalSitesSeen - (sites.length - allowed.length),
-  });
-  emit.log(`history: ${digest.sites.length} of ${digest.totalSitesSeen} domains`);
-  return digest;
-}
-
 async function runGetPageHtml(
   event: CustomToolUse,
   ctx: {
@@ -340,34 +310,12 @@ async function runGetPageHtml(
     blockedSites: string[];
   },
 ): Promise<GetPageHtmlResult> {
-  const input = event.input as { urls: string[]; loadDelayMs?: number };
-  ctx.emit.phase("scraping", `${input.urls.length} pages`);
-
-  const allowed: string[] = [];
-  const blocked: GetPageHtmlResult["failed"] = [];
-  for (const url of input.urls) {
-    // Match on the URL the browser will load; malformed URLs never reach the signed-in browser.
-    if (isAllowedUrl(url, ctx.blockedSites)) allowed.push(url);
-    else blocked.push({ url, reason: "blocked by the user's settings" });
-  }
-
-  // Skip the bridge entirely when nothing is left, so no scraper window opens.
-  const { pages: loaded, failed } = allowed.length
-    ? await ctx.bridge.getPageHtml({
-        urls: allowed,
-        loadDelayMs: input.loadDelayMs ?? DEFAULTS.loadDelayMs,
-      })
-    : { pages: [], failed: [] };
-
-  // A redirect can land on a blocked host, and a public-looking name (fritz.box, an
-  // intranet name) can resolve to a private address; drop what it read before anything is uploaded.
-  const pages = loaded.filter((page) => {
-    const urlAllowed = !page.finalUrl || isAllowedUrl(page.finalUrl, ctx.blockedSites);
-    if (urlAllowed && !(page.ip && isPrivateAddress(page.ip))) return true;
-    blocked.push({ url: page.url, reason: "blocked by the user's settings" });
-    return false;
-  });
-  if (blocked.length) ctx.emit.log(`blocked: ${blocked.length} url(s)`);
+  const { pages, blocked, failed } = await loadAllowedPages(
+    event.input as { urls: string[]; loadDelayMs?: number },
+    ctx.bridge,
+    ctx.emit,
+    ctx.blockedSites,
+  );
 
   const refs: PageRef[] = [];
   const mountFailures = [...blocked, ...failed];
@@ -417,52 +365,50 @@ async function runGetPageHtml(
 // deliverable retrieval
 // ---------------------------------------------------------------------------
 
-const CODE_FENCE = /```(?:tsx|jsx|ts|js|typescript|javascript)?\s*\n([\s\S]*?)```/;
-
-/** Strip a ```tsx fence, if the model wrapped the file contents in one. */
-function stripFence(text: string): string {
-  const fenced = text.match(CODE_FENCE);
-  return (fenced ? fenced[1] : text).trim();
-}
-
 async function collectDeliverable(
   client: Anthropic,
   sessionId: string,
   finalMessage: string,
   emit: Emit,
-): Promise<{ code: string; source: HomepageBuildResult["source"] }> {
+): Promise<{ edition: Edition; source: HomepageBuildResult["source"] }> {
+  let invalid: string | undefined;
   // There is a short indexing lag between status_idle and outputs appearing.
-  for (let attempt = 0; attempt < 5; attempt++) {
+  for (let attempt = 0; attempt < 5 && !invalid; attempt++) {
     try {
       for await (const file of client.beta.files.list({
         scope_id: sessionId,
         betas: [MANAGED_AGENTS_BETA],
       })) {
-        if (!/\.(tsx|jsx|ts|js)$/.test(file.filename)) continue;
+        if (!/\.json$/.test(file.filename)) continue;
         const response = await client.beta.files.download(file.id);
         const text = await response.text();
-        if (text.trim()) {
-          emit.log(`deliverable from session output: ${file.filename} (${text.length}b)`);
-          return { code: stripFence(text), source: "session-output" };
+        if (!text.trim()) continue;
+        emit.log(`deliverable from session output: ${file.filename} (${text.length}b)`);
+        try {
+          return { edition: parseEdition(text), source: "session-output" };
+        } catch (err) {
+          invalid = err instanceof Error ? err.message : String(err);
+          emit.log(`session output rejected: ${invalid}`);
         }
       }
     } catch (err) {
       emit.log(`files.list attempt ${attempt + 1} failed: ${String(err)}`);
     }
-    await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+    if (!invalid) await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
   }
 
-  // Fallback: the model sometimes answers with the component inline instead of
+  // Fallback: the model sometimes answers with the JSON inline instead of
   // (or as well as) writing it. Better than failing the run outright.
-  const fenced = finalMessage.match(CODE_FENCE);
-  if (fenced && fenced[1].includes("PersonalizedHomepage")) {
-    emit.log("deliverable recovered from message fence");
-    return { code: fenced[1].trim(), source: "message-fence" };
+  const inline = editionFromMessage(finalMessage);
+  if (inline) {
+    emit.log("deliverable recovered from message");
+    return { edition: inline, source: "message-fence" };
   }
 
   throw new Error(
-    `Agent produced no homepage. Expected a file at ${OUTPUT_PATH}. ` +
-      `Final message: ${finalMessage.slice(0, 400)}`,
+    invalid
+      ? `The agent's edition was unusable: ${invalid}`
+      : `Agent produced no homepage. Expected a file at ${OUTPUT_PATH}. Final message: ${finalMessage.slice(0, 400)}`,
   );
 }
 

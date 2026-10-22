@@ -1,24 +1,32 @@
 import { useCallback, useEffect, useState } from "react";
-import { DEFAULT_MODEL, DEFAULT_BLOCKED_SITES, type HomepageModel } from "@homepage/agent-core";
+import { DEFAULT_BLOCKED_SITES, DEFAULT_MODEL, PROVIDERS, type HomepageModel, type ProviderId } from "@homepage/agent-core";
 import { BUILD_STEPS } from "@/lib/protocol";
-import { KEYS, extensionStore, loadHomepage, loadSettings, saveSetting } from "@/lib/storage";
-import { toRenderable } from "@/lib/transpile";
+import { KEYS, extensionStore, loadHomepage, loadSettings, saveApiKey, saveSetting, type Homepage } from "@/lib/storage";
 import { ApiKeySetup } from "./components/ApiKeySetup";
 import { BuildProgress } from "./components/BuildProgress";
-import { HomepagePreview } from "./components/HomepagePreview";
+import { Newspaper } from "./components/Newspaper";
 import { SettingsModal } from "./components/SettingsModal";
 import { btn, errorBox } from "./components/ui";
 import { useHomepageBuild } from "./useHomepageBuild";
 
 export default function App() {
   const [loading, setLoading] = useState(true);
-  const [apiKey, setApiKey] = useState<string | null>(null);
+  const [provider, setProvider] = useState<ProviderId>("anthropic");
+  const [apiKeys, setApiKeys] = useState<Record<ProviderId, string | null>>({
+    anthropic: null,
+    gemini: null,
+    openrouter: null,
+  });
   const [systemPrompt, setSystemPrompt] = useState("");
   const [blockedSites, setBlockedSites] = useState<string[]>(DEFAULT_BLOCKED_SITES);
-  const [model, setModel] = useState<HomepageModel>(DEFAULT_MODEL);
+  const [models, setModels] = useState<Record<ProviderId, string>>({
+    anthropic: DEFAULT_MODEL,
+    gemini: PROVIDERS.gemini.defaultModel,
+    openrouter: PROVIDERS.openrouter.defaultModel,
+  });
   const [autoRebuild, setAutoRebuild] = useState(true);
-  /** Transpiled homepage, ready for Sandpack. */
-  const [renderedCode, setRenderedCode] = useState<string | null>(null);
+  /** The latest edition; the layout around it is fixed. */
+  const [homepage, setHomepage] = useState<Homepage | null>(null);
   /** A session left mid-flight, offered as "Resume interrupted build". */
   const [resumable, setResumable] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
@@ -27,7 +35,7 @@ export default function App() {
   /** The error the user dismissed, so a stale banner doesn't linger. */
   const [dismissedError, setDismissedError] = useState<string | null>(null);
 
-  const { state, build, cancel } = useHomepageBuild((code) => setRenderedCode(toRenderable(code)));
+  const { state, build, cancel } = useHomepageBuild(setHomepage);
 
   // Once a build finishes, drop back to the homepage view.
   useEffect(() => {
@@ -39,28 +47,39 @@ export default function App() {
   useEffect(() => {
     (async () => {
       try {
-        const [settings, homepage, activeSession] = await Promise.all([
+        const [settings, saved, activeSession] = await Promise.all([
           loadSettings(),
           loadHomepage(),
           extensionStore.get<string>(KEYS.activeSessionId),
         ]);
-        setApiKey(settings.apiKey);
+        setProvider(settings.provider);
+        setApiKeys(settings.apiKeys);
         setSystemPrompt(settings.systemPrompt);
         setBlockedSites(settings.blockedSites);
-        setModel(settings.model);
+        setModels({ anthropic: settings.model, gemini: settings.geminiModel, openrouter: settings.openrouterModel });
         setAutoRebuild(settings.autoRebuild);
         setResumable(activeSession ?? null);
-        if (homepage?.code) setRenderedCode(toRenderable(homepage.code));
+        if (saved) setHomepage(saved);
       } finally {
         setLoading(false);
       }
     })();
   }, []);
 
-  const saveKey = useCallback(async (key: string) => {
-    await saveSetting("apiKey", key);
-    setApiKey(key);
+  const saveKey = useCallback(async (which: ProviderId, key: string) => {
+    await saveApiKey(which, key);
+    setApiKeys((keys) => ({ ...keys, [which]: key }));
   }, []);
+
+  /** First-run setup: the provider whose key was just entered becomes the active one. */
+  const saveFirstKey = useCallback(
+    async (which: ProviderId, key: string) => {
+      await saveKey(which, key);
+      await saveSetting("provider", which);
+      setProvider(which);
+    },
+    [saveKey],
+  );
 
   const savePrompt = useCallback(
     async (prompt: string, sites: string[]) => {
@@ -68,16 +87,22 @@ export default function App() {
       setBlockedSites(sites);
       setSystemPrompt(prompt);
       setShowSettings(false);
-      setRenderedCode(null);
+      setHomepage(null);
       build();
     },
     [build],
   );
 
   // These persist immediately; the worker reads them on its next heartbeat or build.
-  const changeModel = useCallback(async (next: HomepageModel) => {
-    setModel(next);
-    await saveSetting("model", next);
+  const changeProvider = useCallback(async (next: ProviderId) => {
+    setProvider(next);
+    await saveSetting("provider", next);
+  }, []);
+  const changeModel = useCallback(async (which: ProviderId, next: string) => {
+    setModels((m) => ({ ...m, [which]: next }));
+    if (which === "gemini") await saveSetting("geminiModel", next.trim());
+    else if (which === "openrouter") await saveSetting("openrouterModel", next.trim());
+    else await saveSetting("model", next as HomepageModel);
   }, []);
   const toggleAutoRebuild = useCallback(async (next: boolean) => {
     setAutoRebuild(next);
@@ -85,86 +110,101 @@ export default function App() {
   }, []);
 
   if (loading) return <div style={{ padding: 20, textAlign: "center" }}>Loading…</div>;
-  if (!apiKey) return <ApiKeySetup onSave={saveKey} />;
+  if (!Object.values(apiKeys).some(Boolean)) return <ApiKeySetup initialProvider={provider} onSave={saveFirstKey} />;
 
   // With no homepage to fall back to, a running build takes over the tab.
-  if (state.running && (!renderedCode || viewProgress)) {
+  if (state.running && (!homepage || viewProgress)) {
     return (
       <BuildProgress
         state={state}
         onCancel={cancel}
-        onBack={renderedCode ? () => setViewProgress(false) : undefined}
+        onBack={homepage ? () => setViewProgress(false) : undefined}
       />
     );
   }
 
-  if (!renderedCode) {
-    return (
-      <div style={{ maxWidth: 560, margin: "14vh auto", padding: 24, fontFamily: "system-ui" }}>
-        <h1 style={{ fontSize: 26 }}>Build your homepage</h1>
-        <p style={{ color: "#555", lineHeight: 1.6 }}>
-          The agent reads your browsing history, opens the pages you actually follow, and writes a
-          homepage from what it finds today.
-        </p>
-        {state.error && (
-          <div style={{ ...errorBox, margin: "16px 0", padding: 12, borderRadius: 4 }}>{state.error}</div>
-        )}
-        <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
-          <button style={btn} onClick={() => build()}>
-            Build today&apos;s homepage
+  const settingsModal = showSettings && (
+    <SettingsModal
+      initialPrompt={systemPrompt}
+      blockedSites={blockedSites}
+      provider={provider}
+      onChangeProvider={changeProvider}
+      apiKeys={apiKeys}
+      onSaveKey={saveKey}
+      models={models}
+      onChangeModel={changeModel}
+      autoRebuild={autoRebuild}
+      onToggleAutoRebuild={toggleAutoRebuild}
+      onClose={() => setShowSettings(false)}
+      onSave={savePrompt}
+    />
+  );
+
+  const toolbar = (
+    <>
+      {state.running ? (
+        // A build is running in the background (from here, another tab, or the
+        // scheduled rebuild). Let the user watch it without losing this page.
+        <button className="paper-btn paper-btn-live" onClick={() => setViewProgress(true)} title="View build progress">
+          <span className="paper-dot" />
+          Printing {Math.min(state.stepIndex + 1, BUILD_STEPS.length)}/{BUILD_STEPS.length}
+        </button>
+      ) : (
+        homepage && (
+          <button className="paper-btn" onClick={() => build()} title="Rebuild now">
+            ↻ Rebuild
           </button>
-          {resumable && (
-            <button style={{ ...btn, backgroundColor: "#555" }} onClick={() => build({ resume: true })}>
-              Resume interrupted build
+        )
+      )}
+      <button className="paper-btn" onClick={() => setShowSettings(true)} title="Settings">
+        Settings
+      </button>
+    </>
+  );
+
+  if (!homepage) {
+    return (
+      <Newspaper edition={null} toolbar={toolbar}>
+        <div className="paper-card">
+          <h2>Today&apos;s edition</h2>
+          <p>
+            The agent reads your browsing history, opens the pages you actually follow, and fills
+            this front page with what it finds today.
+          </p>
+          {state.error && <div className="paper-card-error">{state.error}</div>}
+          <div className="paper-card-actions">
+            <button className="paper-btn paper-btn-primary" onClick={() => build()}>
+              Print today&apos;s edition
             </button>
-          )}
+            {resumable && (
+              <button className="paper-btn" onClick={() => build({ resume: true })}>
+                Resume interrupted build
+              </button>
+            )}
+          </div>
+          <p className="paper-card-note">
+            {PROVIDERS[provider].label} · {models[provider]}
+          </p>
         </div>
-      </div>
+        {settingsModal}
+      </Newspaper>
     );
   }
 
   const showError = state.error && dismissedError !== state.error;
 
   return (
-    <div style={{ height: "100vh", width: "100vw" }}>
-      <div style={{ position: "fixed", top: 20, right: 20, zIndex: 999, display: "flex", gap: 8 }}>
-        {state.running ? (
-          // A build is running in the background (from here, another tab, or the
-          // scheduled rebuild). Let the user watch it without losing this page.
-          <button
-            style={{ ...btn, backgroundColor: "#0a7", display: "flex", alignItems: "center", gap: 8 }}
-            onClick={() => setViewProgress(true)}
-            title="View build progress"
-          >
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: "white",
-                animation: "hb-pulse 1.2s ease-in-out infinite",
-              }}
-            />
-            Building… {Math.min(state.stepIndex + 1, BUILD_STEPS.length)}/{BUILD_STEPS.length}
-          </button>
-        ) : (
-          <button style={btn} onClick={() => build()} title="Rebuild now">
-            ↻ Rebuild
-          </button>
-        )}
-        <button style={btn} onClick={() => setShowSettings(true)} title="Customize homepage">
-          ⚙️ Settings
-        </button>
-      </div>
-
+    <>
       {showError && (
         <div
           style={{
             ...errorBox,
             position: "fixed",
-            top: 20,
-            left: 20,
-            right: 260,
+            top: 16,
+            left: 16,
+            right: 16,
+            maxWidth: 900,
+            margin: "0 auto",
             zIndex: 999,
             padding: "10px 14px",
             borderRadius: 6,
@@ -196,20 +236,9 @@ export default function App() {
         </div>
       )}
 
-      <HomepagePreview code={renderedCode} />
+      <Newspaper edition={homepage.edition} builtAt={homepage.timestamp} toolbar={toolbar} />
 
-      {showSettings && (
-        <SettingsModal
-          initialPrompt={systemPrompt}
-          blockedSites={blockedSites}
-          model={model}
-          onChangeModel={changeModel}
-          autoRebuild={autoRebuild}
-          onToggleAutoRebuild={toggleAutoRebuild}
-          onClose={() => setShowSettings(false)}
-          onSave={savePrompt}
-        />
-      )}
-    </div>
+      {settingsModal}
+    </>
   );
 }

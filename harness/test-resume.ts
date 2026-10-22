@@ -113,7 +113,7 @@ async function resume() {
   console.log("\n========== RESUME RESULT ==========");
   console.log(`✅ session reattached and completed: ${result.sessionId}`);
   console.log(`${reAnswered ? "✅" : "❌"} orphaned tool call was re-answered`);
-  console.log(`✅ deliverable recovered (${result.code.length}b, via ${result.source})`);
+  console.log(`✅ deliverable recovered (${JSON.stringify(result.edition).length}b, via ${result.source})`);
 
   const sameSession = result.sessionId === sessionId;
   console.log(`${sameSession ? "✅" : "❌"} resumed the same session (no restart)`);
